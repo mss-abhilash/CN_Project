@@ -1,0 +1,361 @@
+# WireGuard VPN Integration — Walkthrough
+
+## Summary
+
+Complete WireGuard VPN integration for the IoT VPN + 2FA project. VPN access is **bound to authentication** — only users who complete full two-phase auth (password + TOTP) can create, download, or manage VPN configurations.
+
+## What Changed
+
+### 1. VPN Module — `vpn/wireguard_config.py`
+- **Real Curve25519 key generation** via the `cryptography` library (replaces placeholder keys)
+- **Preshared key (PSK)** support for post-quantum defence-in-depth
+- **IP address pool manager** — auto-assigns IPs from `10.0.0.0/24`, reserves `.1` for gateway
+- **VPNManager class** — orchestrates key generation, IP allocation, config export
+- Configs exported to `vpn/configs/` directory (both `wg0.conf` server and per-peer `.conf` files)
+
+### 2. Database — `database/models.py`
+- New **`VPNPeer`** table linked to `users` via foreign key
+- Stores: peer name, public key, encrypted private key, PSK, assigned IP, device type, active status
+- Relationship: `User.vpn_peers` ↔ `VPNPeer.owner`
+
+### 3. Backend API — `backend/main.py`
+Five new VPN endpoints, all requiring **phase2 (full 2FA) authentication**:
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `POST` | `/vpn/peers` | Create a new VPN peer |
+| `GET` | `/vpn/peers` | List user's VPN peers |
+| `GET` | `/vpn/peers/{name}/config` | Download WireGuard .conf file |
+| `DELETE` | `/vpn/peers/{name}` | Revoke a VPN peer |
+| `GET` | `/vpn/status` | VPN server status |
+
+### 4. Schemas — `backend/schemas.py`
+- Added: `VPNPeerCreateRequest`, `VPNPeerResponse`, `VPNPeerConfigResponse`, `VPNPeerListResponse`, `VPNStatusResponse`
+
+### 5. Config & Dependencies
+- `.env` — Added `VPN_SERVER_HOST` and `VPN_CONFIG_DIR`
+- `requirements.txt` — Pinned `bcrypt==4.0.1` (passlib compatibility fix)
+
+---
+
+## Auth → VPN Flow
+
+```
+User registers → gets TOTP QR code
+       ↓
+POST /login (password) → phase1 token
+       ↓
+POST /verify-otp (TOTP code) → phase2 token ✓
+       ↓
+POST /vpn/peers → creates VPN peer (keys + IP)
+       ↓
+GET /vpn/peers/{name}/config → downloads .conf file
+       ↓
+Import into WireGuard client → VPN tunnel established
+```
+
+> [!IMPORTANT]
+> Without completing both auth phases, all `/vpn/*` endpoints return **HTTP 401**.
+
+---
+
+## WireGuard Setup Instructions
+
+### Install WireGuard
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update && sudo apt install wireguard
+```
+
+**Windows:**
+Download from https://www.wireguard.com/install/
+
+**macOS:**
+```bash
+brew install wireguard-tools
+```
+
+### Start the VPN Server (Gateway)
+
+```bash
+# Copy the generated server config
+sudo cp vpn/configs/wg0.conf /etc/wireguard/wg0.conf
+
+# Start the WireGuard interface
+sudo wg-quick up wg0
+
+# Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# Check status
+sudo wg show
+```
+
+### Stop the VPN Server
+
+```bash
+sudo wg-quick down wg0
+```
+
+### Connect an IoT Device (Client)
+
+1. Complete 2FA authentication via the API
+2. Create a peer: `POST /vpn/peers`
+3. Download the config: `GET /vpn/peers/{name}/config`
+4. Import into WireGuard:
+   ```bash
+   # Linux
+   sudo cp iot-camera-001.conf /etc/wireguard/iot-camera-001.conf
+   sudo wg-quick up iot-camera-001
+   
+   # Windows/macOS: Import the .conf file via the WireGuard GUI
+   ```
+
+### Revoke a Device
+
+```bash
+# Via API
+curl -X DELETE http://localhost:8000/vpn/peers/iot-camera-001 \
+  -H "Authorization: Bearer <phase2_token>"
+  
+# Then reload server config
+sudo wg-quick down wg0 && sudo wg-quick up wg0
+```
+
+---
+
+## Test Results
+
+All 12 smoke tests passed:
+
+| # | Test | Result |
+|---|------|--------|
+| 1 | Health check | ✅ |
+| 2 | All 9 routes registered | ✅ |
+| 3 | VPN status rejects unauthenticated | ✅ HTTP 401 |
+| 4 | VPN peers rejects unauthenticated | ✅ HTTP 401 |
+| 5 | User registration | ✅ HTTP 201 |
+| 6 | Phase 1 login | ✅ Phase1 token issued |
+| 7 | Phase 2 OTP verification | ✅ Phase2 token issued |
+| 8 | Create VPN peer | ✅ HTTP 201, IP 10.0.0.2 |
+| 9 | List VPN peers | ✅ 1 active peer |
+| 10 | Download peer config | ✅ Valid WireGuard .conf |
+| 11 | VPN server status | ✅ 252 IPs available |
+| 12 | Revoke VPN peer | ✅ Peer deactivated |
+
+## Files Modified/Created
+
+| File | Action |
+|------|--------|
+| [wireguard_config.py](file:///d:/CN_PROJECT/vpn/wireguard_config.py) | **Rewritten** — Real Curve25519 keys, IP pool, VPNManager |
+| [models.py](file:///d:/CN_PROJECT/database/models.py) | **Modified** — Added VPNPeer table + relationship |
+| [main.py](file:///d:/CN_PROJECT/backend/main.py) | **Modified** — 5 new VPN endpoints |
+| [schemas.py](file:///d:/CN_PROJECT/backend/schemas.py) | **Modified** — VPN request/response schemas |
+| [.env](file:///d:/CN_PROJECT/.env) | **Modified** — VPN_SERVER_HOST, VPN_CONFIG_DIR |
+| [requirements.txt](file:///d:/CN_PROJECT/requirements.txt) | **Modified** — Pinned bcrypt==4.0.1 |
+| [test_vpn_endpoints.py](file:///d:/CN_PROJECT/scripts/test_vpn_endpoints.py) | **New** — Full smoke test script |
+| `vpn/configs/wg0.conf` | **Generated** — Server config |
+| `vpn/configs/*.conf` | **Generated** — Peer configs |
+
+---
+
+## IoT Device Simulation integration
+
+Three realistic smart device simulation scripts have been implemented, integrating directly with the Gateway system to mock actual hardware on an IoT network structure. 
+
+### Device Mock Scripts Included:
+- **`smart_camera.py`** — Simulated motion detection statuses and FPS output telemetry.
+- **`temperature_sensor.py`** — Heat fluctuations tracking with battery life percentage mapping.
+- **`smart_lock.py`** — Deadbolt auto-lock states and mechanical actions simulation.
+- **`base_device.py`** — Object-Oriented base inheritance class handling AES-128-GCM initialization for payloads, encryption and token authorization handshakes.
+
+### Authentication Routine
+1. Initialization: Device script spins up and immediately generates a highly secure **128-bit unique AES key**.
+2. **`POST /device/register`**: Registers its identity and pushes its new AES key to the Gateway system over the isolated VPN.
+3. **`POST /device/auth`**: Transmits unique credentials establishing a trusted **long-lived JWT Bearer token** session.
+4. **`POST /device/telemetry`**: Periodical transmission polling cycle encrypts custom payload statuses using `AES-128 GCM` blocks via the internal IP infrastructure directly to Backend.
+
+> [!TIP]
+> Use the parallel testing environment via `venv/Scripts/Activate.ps1; python scripts/test_devices_parallel.py` to watch all 3 modules launch independently and authenticate concurrently.
+
+---
+
+## Gateway ACL Security System
+
+A strict 3-layer access control system that intercepts **every** HTTP request before it reaches any endpoint handler.
+
+### Architecture
+
+```
+Incoming Request
+       |
+       v
++---------------------+
+|  Security Middleware |  <-- Intercepts ALL requests
+|  (FastAPI layer)     |
++---------------------+
+       |
+       v
++---------------------+
+|    ACL Engine        |  <-- 3-layer evaluation
+|  1. IP Layer         |  Whitelist/blacklist by CIDR
+|  2. Session Layer    |  JWT phase validation
+|  3. Device Layer     |  Per-device endpoints + rate limit
++---------------------+
+       |
+  ALLOW / DENY(403)
+       |
+       v
+  Endpoint Handler
+```
+
+### Three ACL Layers
+
+| Layer | What it checks | Deny reason |
+|-------|---------------|-------------|
+| **IP** | Source IP against whitelist/blacklist (CIDR) | `IP_BLACKLISTED`, `IP_NOT_WHITELISTED` |
+| **Session** | JWT presence, validity, phase (`phase1`/`phase2`/`device_auth`) | `SESSION_MISSING`, `SESSION_INVALID`, `SESSION_PHASE_INSUFFICIENT` |
+| **Device** | Device registration, block status, endpoint permissions, rate limit | `DEVICE_BLOCKED`, `DEVICE_ENDPOINT_DENIED`, `DEVICE_RATE_LIMITED` |
+
+> [!IMPORTANT]
+> **Blacklist overrides whitelist.** A blacklisted IP is denied even if it's within the VPN subnet.
+> All denied requests are logged to both in-memory storage and persistent file at `logs/acl_blocked.log`.
+
+### Route Classification
+
+| Category | Routes | Auth Required |
+|----------|--------|--------------|
+| **Public** | `/health`, `/docs`, `/openapi.json`, `/redoc` | None |
+| **Unauthenticated** | `/register`, `/login`, `/device/register`, `/device/auth` | None |
+| **Phase 1** | `/verify-otp` | Phase1 token |
+| **Device** | `/device/telemetry` | Device token |
+| **Protected** | Everything else (`/me`, `/vpn/*`, `/gateway/*`) | Phase2 (full 2FA) |
+
+### Admin Endpoints
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/gateway/acl/stats` | Enforcement statistics (evaluations, denials by layer) |
+| `GET` | `/gateway/acl/blocked` | View recent blocked request log |
+| `POST` | `/gateway/acl/blacklist` | Blacklist an IP/CIDR range |
+| `DELETE` | `/gateway/acl/blacklist` | Remove IP from blacklist |
+| `POST` | `/gateway/acl/block-device` | Block a device by ID |
+| `POST` | `/gateway/acl/unblock-device` | Unblock a device |
+
+### Files Created/Modified
+
+| File | Action |
+|------|--------|
+| [acl_engine.py](file:///d:/CN_PROJECT/gateway/acl_engine.py) | **New** — Core ACL engine (IP/device/session layers, rate limiter, logging) |
+| [security_middleware.py](file:///d:/CN_PROJECT/gateway/security_middleware.py) | **New** — FastAPI middleware intercepting every request |
+| [main.py](file:///d:/CN_PROJECT/backend/main.py) | **Modified** — Middleware wiring, ACL admin endpoints, device ACL sync |
+| [gateway_core.py](file:///d:/CN_PROJECT/gateway/gateway_core.py) | **Modified** — Fixed unicode encoding for Windows |
+| [test_acl_gateway.py](file:///d:/CN_PROJECT/scripts/test_acl_gateway.py) | **New** — 20-test end-to-end suite |
+| `logs/acl_blocked.log` | **Generated** — Persistent blocked request audit trail |
+
+### Test Results — 20/20 Passed
+
+| # | Test | Result |
+|---|------|--------|
+| 1 | Public route `/health` passes | PASS |
+| 2 | Public route `/docs` passes | PASS |
+| 3 | `/me` blocked without auth | PASS (403) |
+| 4 | `/vpn/status` blocked without auth | PASS (403) |
+| 5 | `/gateway/acl/stats` blocked without auth | PASS (403) |
+| 6 | User registration | PASS (201) |
+| 7 | Phase 1 login | PASS |
+| 8 | Phase 2 OTP verify | PASS |
+| 9 | `/me` passes with phase2 token | PASS |
+| 10 | Device registration (syncs ACL) | PASS |
+| 11 | Device authentication | PASS |
+| 12 | Device telemetry (authorized) | PASS |
+| 13 | Block device via admin | PASS |
+| 14 | Blocked device telemetry denied | PASS (403) |
+| 15 | Unblock device via admin | PASS |
+| 16 | Unblocked device telemetry works | PASS |
+| 17 | ACL stats endpoint | PASS |
+| 18 | Blocked log endpoint | PASS |
+| 19 | IP blacklist (192.168.99.0/24) | PASS |
+| 20 | Remove IP blacklist | PASS |
+
+---
+
+## Penetration Testing — Before & After
+
+A complete 3-attack penetration test suite demonstrating the security posture before and after implementing 2FA + VPN + ACL.
+
+### How to Run
+```bash
+# Start the server
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+# Run the pentest
+python attacks/pentest_demo.py
+```
+
+### Attack Vectors & Results
+
+| # | Attack | BEFORE Security | AFTER Security | Key Defence |
+|---|--------|----------------|---------------|-------------|
+| 1 | **Replay Attack** | Captured tokens reused indefinitely | JWT expires (5/30min), TOTP valid 30s only | 2FA + JWT expiry |
+| 2 | **Brute-Force Login** | Unlimited attempts, no lockout | Rate-limited at 5/min, locked after 5 fails | Rate limit + lockout + 2FA |
+| 3 | **Packet Sniffing** | All data plaintext (passwords, PINs, tokens) | Double encryption (VPN + AES-GCM) | WireGuard + AES-128-GCM |
+
+### Security Controls Summary
+
+| Control | Defends Against |
+|---------|----------------|
+| Two-Phase Auth (2FA) | Replay, brute-force, credential theft |
+| WireGuard VPN | Packet sniffing, MitM, network eavesdropping |
+| AES-128-GCM | Payload interception (even inside VPN) |
+| Rate Limiting (5/min) | Brute-force, credential stuffing |
+| Account Lockout (15min) | Sustained brute-force campaigns |
+| JWT Token Expiry | Token replay, session hijacking |
+| ACL Middleware | Unauthorized access at network layer |
+
+### File
+
+| File | Description |
+|------|-------------|
+| [pentest_demo.py](file:///d:/CN_PROJECT/attacks/pentest_demo.py) | **New** — Full before/after pentest suite (3 attacks) |
+
+---
+
+## Performance Analyzer — Security Overhead
+
+A network performance analysis tool was built to measure the overhead that the security controls (2FA, AES-128 GCM, ACL) introduce compared to an unsecured baseline.
+
+### How to Run
+```bash
+# Start the server
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+# Run the performance test
+python scripts/performance_test.py
+```
+
+### Metrics Measured
+
+1. **Authentication Latency**: The time it takes a user to fully establish a session.
+    - *Baseline*: `~3ms` (Mocked single-step HTTP login)
+    - *Secured*: `~115ms` (Includes `bcrypt` hashing + `pyotp.TOTP` verification)
+2. **Connection Time**: The time to establish the initial network tunnel parameters.
+    - *Baseline*: `~3ms` (Standard HTTP)
+    - *Secured*: `~3ms` (Curve25519 Key Generation via cryptography is extremely fast and adds almost 0% overhead over network RTT)
+3. **Transport Throughput**: Rate of payload parsing.
+    - *Baseline*: `~433 req/sec` (Plaintext JSON)
+    - *Secured*: `~242 req/sec` (AES-128-GCM + ACL routing) -> Representing a `~44.0%` decline in speed in exchange for total payload integrity.
+4. **Packet Loss**:
+    - Remained `0.00%` across 50 iterations indicating robust routing.
+
+### Graphing Suggestions
+1. **Bar Chart: Latency Overhead**: Grouped bars mapping Baseline vs Secured authentication latency with a Logarithmic Y-axis. 
+2. **Line Graph: Throughput Decay**: X-axis representing Payload Size (KB), Y-axis representing req/sec. Two contrasting lines showing baseline (Plaintext JSON) dropping less steeply than AES-GCM as payload chunk size increases.
+3. **Pie Chart: Security Time Budget**: Showing the distribution of processing time inside the backend per authentication event (Network RTT `~3ms`, bcrypt hash duration `~100ms`, TOTP check `~10ms`).
+
+### Code Addition
+
+| File | Description |
+|------|-------------|
+| [performance_test.py](file:///d:/CN_PROJECT/scripts/performance_test.py) | **New** — Analysis framework looping payloads to contrast API benchmarks against a plaintext baseline. |
