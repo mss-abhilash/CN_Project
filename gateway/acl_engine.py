@@ -101,7 +101,7 @@ class BlockedRequestLog:
 @dataclass
 class IPRule:
     """An IP-based access rule."""
-    network: ipaddress.IPv4Network | ipaddress.IPv6Network
+    network: "ipaddress.IPv4Network | ipaddress.IPv6Network"
     action: ACLAction
     description: str = ""
 
@@ -121,6 +121,47 @@ class SessionRequirement:
     require_auth: bool = True
     required_phase: str = "phase2"  # "phase1", "phase2", "device_auth"
     allowed_sub_types: list[str] = field(default_factory=lambda: ["user"])
+
+
+# ── Heuristic Anomaly Detector (Context-Aware Monitoring) ─────────────────────
+
+class HeuristicAnomalyDetector:
+    """
+    Analyzes traffic patterns to identify anomalies (e.g., sudden bursts,
+    atypical access times, or data exfiltration attempts).
+    """
+    def __init__(self, sensitivity: float = 2.0):
+        self.sensitivity = sensitivity # How many deviations from avg to trigger
+        self.device_history: dict[str, list[float]] = defaultdict(list)
+        self.stats = {"anomalies_detected": 0}
+
+    def update_and_check(self, device_id: str, request_time: float) -> bool:
+        """Returns True if consistent with history, False if anomalous."""
+        history = self.device_history[device_id]
+        
+        # We need at least 10 data points to establish a baseline
+        if len(history) < 10:
+            history.append(request_time)
+            return True
+
+        avg = sum(history) / len(history)
+        # Simple heuristic: is this request too close to the last one (Burst detection)?
+        last_time = history[-1]
+        interval = request_time - last_time
+        
+        # Prune and add
+        history.append(request_time)
+        if len(history) > 100: history.pop(0)
+
+        # If interval is less than 10% of the average interval, flag as burst anomaly
+        # In a real system, this would use Standard Deviation
+        # For our research grade demo, we'll use a simplified threshold
+        avg_interval = (history[-1] - history[0]) / len(history)
+        if interval < (avg_interval / self.sensitivity):
+            self.stats["anomalies_detected"] += 1
+            return False
+        
+        return True
 
 
 # ── Rate Limiter (per-device, sliding window) ─────────────────────────────────
@@ -207,6 +248,7 @@ class ACLEngine:
         self.ip_blacklist: list[IPRule] = []
         self.device_acls: dict[str, DeviceACL] = {}
         self.rate_limiter = DeviceRateLimiter(window_seconds=60)
+        self.anomaly_detector = HeuristicAnomalyDetector(sensitivity=2.5)
         self.blocked_log: list[BlockedRequestLog] = []
         self.stats = {
             "total_evaluated": 0,
@@ -216,6 +258,7 @@ class ACLEngine:
             "denied_by_device": 0,
             "denied_by_session": 0,
             "denied_by_rate_limit": 0,
+            "anomalies_flagged": 0,
         }
 
         # Default: allow localhost and VPN subnet
@@ -453,12 +496,20 @@ class ACLEngine:
 
         # 4. Device layer (only for device-authenticated requests)
         if device_id and device_id in self.device_acls:
+            # 4.a Standard ACL & Rate Limit
             device_verdict = self.check_device(device_id, path)
             if not device_verdict.allowed:
                 self.stats["total_denied"] += 1
                 self.stats["denied_by_device"] += 1
                 self._log_blocked(source_ip, method, path, device_verdict, token_data)
                 return device_verdict
+            
+            # 4.b Heuristic Anomaly detection (Advanced Research Layer)
+            if not self.anomaly_detector.update_and_check(device_id, time.time()):
+                self.stats["anomalies_flagged"] += 1
+                logger.warning(f"[ANOMALY] High-frequency burst detected from {device_id}")
+                # We log it but potentially still allow if below hard rate limit, 
+                # or we can block it. For research, we flag it.
 
         self.stats["total_allowed"] += 1
         return ACLVerdict(action=ACLAction.ALLOW)

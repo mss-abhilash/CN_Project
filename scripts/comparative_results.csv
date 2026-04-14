@@ -1,0 +1,4 @@
+protocol,avg_ms,max_ms,p95_ms
+plain,1.11,2.16,1.45
+tls_sim,46.17,47.76,46.77
+vpn_aes,1.47,3.18,1.62
