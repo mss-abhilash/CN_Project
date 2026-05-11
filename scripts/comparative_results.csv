@@ -1,4 +1,4 @@
 protocol,avg_ms,max_ms,p95_ms
-plain,1.11,2.16,1.45
-tls_sim,46.17,47.76,46.77
-vpn_aes,1.47,3.18,1.62
+plain,1.29,13.95,1.41
+tls_sim,46.00,46.59,46.23
+vpn_aes,1.55,3.30,2.02

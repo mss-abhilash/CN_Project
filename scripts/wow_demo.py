@@ -32,10 +32,17 @@ def run_wow_demo():
 
     # Phase 1: Zero-Trust Onboarding
     print_header("PHASE 1: ZERO-TRUST ONBOARDING")
-    print_step("1.1", "Registering 'Smart_Camera_01' with AES-128 GCM Master Key...")
-    cam = BaseIoTDevice("cam-001", "camera", "Front Door Camera", "10.0.0.50")
+    
+    # Use a unique ID for every demo run to avoid "Device Already Registered" errors
+    ts = int(time.time()) % 1000
+    device_id = f"cam-001-{ts}"
+    print_step("1.1", f"Registering '{device_id}' with AES-128 GCM Master Key...")
+    cam = BaseIoTDevice(device_id, "camera", "Front Door Camera", "10.0.0.50")
     if cam.register():
         print("      \033[1;32mSUCCESS:\033[0m Device registered in Secure Vault.")
+    else:
+        # If registration fails, it might already be registered. Try to proceed to auth.
+        print("      \033[1;33mINFO:\033[0m Registration failed. It might already exist in the Vault.")
     
     print_step("1.2", "Initial Authentication Handshake...")
     if cam.authenticate():
